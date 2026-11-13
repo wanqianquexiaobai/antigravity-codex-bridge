@@ -9,6 +9,23 @@
                           ← 进度、报告、验证结果 ←
 ```
 
+<a id="deploy-with-codex"></a>
+
+## 让 Codex 帮你部署
+
+在另一台电脑本地运行的 Codex 桌面端或 CLI 中，复制发送下面这段完整提示词即可：
+
+```text
+请把这个项目部署到这台电脑：
+https://github.com/wanqianquexiaobai/antigravity-codex-bridge
+
+先检查本机的 WSL 和 Antigravity 环境，再按照 README 实际完成安装、配置和连接验证。使用独立的 Codex 执行环境，保留已有的 Codex 登录和其他 MCP 配置。
+
+需要我登录账号或完成系统授权时，提示我操作。完成后确认 Antigravity 能调用 codex-worker，并说明验证结果。
+```
+
+Codex 的账号登录仍需要你在浏览器里完成一次。也可以按照下面的步骤手动安装。
+
 ## 准备条件
 
 - Windows 上已有 WSL 2，并安装 Debian 或 Ubuntu；使用普通 Linux 用户。

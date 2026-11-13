@@ -9,6 +9,15 @@
                           ← 进度、报告、验证结果 ←
 ```
 
+## v2：可观察、可问答的执行代理
+
+- **模型和额度**：查询可用模型、默认模型和额度窗口；运行中的 `actual_model` 回报实际模型，额度给出服务返回的剩余比例、恢复时间和可用的积分字段。未知数据明确标记，不用 token 消耗倒推余额。
+- **执行中问答**：Codex 可用 `ask_gemini` 发起问题。Gemini 收到 `waiting_input` 后用 `codex_reply` 回答，Codex 在同一轮继续；`codex_send` 可向运行中的任务补充要求。
+- **有限异常重试**：默认最多重试 2 次（总共 3 次尝试），限于连接断开和暂时的服务故障；恢复原会话并检查已有修改。等待回答、退避重试也占用唯一活动任务名额。
+- **上下文控制**：状态使用增量游标和去重，默认进度最多 600 字符，报告节选最多 2000 字符，完整报告按需分页。内部推理、完整会话和原始命令输出不自动回传给 Gemini。
+
+Gemini 仍需遵循协作规则并持续查询。服务不会自动唤醒已关闭的 Antigravity 对话；所有账户登录与用户专属决策仍由用户完成。
+
 <a id="deploy-with-codex"></a>
 
 ## 让 Codex 帮你部署
@@ -78,7 +87,7 @@ bash install.sh --wsl-only
 
 > 请调用 codex-worker 的 codex_health，报告 authenticated 和 environment。
 
-预期 `authenticated` 为 `true`，`environment` 显示当前 WSL 发行版，例如 `WSL Debian` 或 `WSL Ubuntu-24.04`。
+预期 `bridge_version` 为 `2.0.0`、`authenticated` 为 `true`，`environment` 显示当前 WSL 发行版。健康检查还会报告 `default_model`、额度与并发/重试限制；具体任务的实际模型以状态中的 `actual_model` 为准。
 
 也可以从仓库目录检查实际 MCP 连接；这个检查只检查程序和登录，不会提交模型任务：
 
@@ -96,24 +105,52 @@ Gemini 必须把目标、上下文、文件路径、限制和验收标准写入�
 
 | MCP 工具 | 用途 |
 | --- | --- |
-| `codex_health` | 检查安装、登录与允许使用的项目范围 |
+| `codex_health` | 检查登录、默认模型、额度与执行限制 |
+| `codex_models` | 查询可用模型与默认模型 |
+| `codex_quota` | 查询额度窗口、剩余比例与恢复时间 |
 | `codex_submit` | 提交任务，立即获得 `job_id` |
-| `codex_status` | 查询进度，每次最多等待 30 秒 |
-| `codex_result` | 获取报告，长报告支持分页 |
+| `codex_status` | 用 `after_cursor` 查询增量进度与待回答问题，每次最多等 30 秒 |
+| `codex_reply` | 回复指定问题，让同一轮任务继续 |
+| `codex_send` | 向正在执行的一轮补充要求，支持请求去重 |
+| `codex_result` | 默认获取短节选，`view="full"` 分页读取完整报告 |
 | `codex_continue` | 续接指定任务的原会话，得到新的 `job_id` |
 | `codex_cancel` | 请求取消，已写入的内容保留 |
-| `codex_list_jobs` | 连接恢复后找回任务 |
+| `codex_list_jobs` | 找回任务，并在预算内恢复已失去工作进程的任务 |
 
 ## 工作范围与限制
 
-- 默认一次执行一个任务，单任务默认 30 分钟，可指定 1–120 分钟。
+- 强制一次只有一个活动任务，包括运行、等待回答和退避重试。额外提交会被拒绝，不自动排队。单任务默认 30 分钟，可指定 1–120 分钟；重试和等待回答都使用同一个总时限。
 - 分析使用 `read-only`；已授权的代码修改使用 `workspace-write`。保留 Codex 自身的执行隔离，不使用完全跳过权限控制的选项。
 - `succeeded` 仅表示模型完成这一轮，不能据此认定所有测试通过。
 - 默认项目范围是 Linux 用户目录，以及能找到的 Windows `Documents` 目录。应传入其中的具体项目目录，不能直接把主目录、允许范围的根目录或应用配置目录作为工作区。
 - 允许根目录用于校验工作目录，不是完整的文件读取隔离；实际执行权限仍由 Codex 控制。只向代理提供任务所需的信息。
 - 使用同一账号时，多个 Codex 客户端可能共享账号额度。避免手动 Codex 和委派任务同时修改同一份文件；并行工作时使用不同工作副本。
-- MCP 连接断开后，任务可继续在后台执行并被重新查询。电脑休眠、关机、WSL 停止会影响任务；不会自动重新执行中断任务。
+- MCP 连接断开后任务继续运行，待回答的问题也保存在本机。工作进程异常退出时，下一次查询可在原时限与重试预算内恢复。电脑关机或 WSL 停止期间不能执行；超时、取消、预算耗尽后不会继续自动重试。
 - Node、Java、项目依赖等仍需根据具体项目安装。本工具只准备桥接服务与 Codex 的运行环境。
+
+## 提问、重试与上下文预算
+
+Gemini 的协作 skill 已覆盖以下流程，日常不需要你手工调用工具。
+
+任务进入 `waiting_input` 时，`codex_status.questions` 返回外层 `question_id`，以及每个问题的内层 `id`。例如：
+
+```json
+{
+  "job_id": "任务返回的编号",
+  "question_id": "这次提问的编号",
+  "answers": {"answer": "采用方案 B"}
+}
+```
+
+把这个对象传给 `codex_reply`。相同回答重复提交不会重复生效，冲突回答会被拒绝。问题默认最多等待 10 分钟；到期后任务失败并保留现场，Gemini 可决定是否续接。账号、秘密和权限扩大不能通过普通问题回答绕过。`codex_send` 的送达状态会作为进度事件返回；连接故障时不要把“已排队”当成“已送达”。
+
+自动重试仅处理连接中断和服务暂时故障，按 2、4 秒等指数退避，单次最多 30 秒。登录失效、额度不足、权限/配置错误、上下文耗尽、取消和提问超时不会自动重试。默认 2 次重试，配置硬上限最多 3 次；调用者可以降低预算，包括设为 0。这里限制的是桥接层的任务尝试次数，不是模型请求总数；每次尝试内部可包含多轮模型调用和客户端自身重试，整体仍受任务总时限约束。模型报告测试失败也不会被误当作网络错误无限重跑。涉及外部发布、推送等不可盲目重复的动作，应设 `max_retries=0`。恢复会话不等于事务回滚，也不提供外部动作“恰好一次”的保证。
+
+状态查询保存并传回上次的 `cursor`；`unchanged=true` 时仅返回短状态，避免重复长消息。`more_events=true` 时继续用新游标读取。报告节选是有截断提示的文本，不是额外调用模型生成的语义摘要；`truncated=true` 时应按验收需要读取完整内容。完整报告默认每页 4000 字符、最多 8000 字符。错误和失败检查不能因节选而被忽略。
+
+额度数据通常缓存 60 秒，也会接收执行过程中的服务更新。传 `refresh=true` 可主动刷新；检查 `observed_at` 和 `stale` 判断新鲜度。不支持的额度或余额保留为未知，积分余额为零也不直接等同于订阅额度耗尽。`usage.session_total` 是会话累计值，`last_reported` 保留最近一次服务用量数据；二者都不是账号剩余额度。
+
+执行端使用官方 Codex App Server 的 stdio 双向协议，包含实验性的动态提问工具接口，因此固定了已测试的 CLI 版本。每次创建和恢复会话都强制关闭内置多代理，并通过执行规则禁止嵌套启动其他 Codex。完整历史留在 Codex 一侧；只有所需的短消息、问题和报告进入 Gemini 上下文。
 
 ## 其他磁盘与运行工具
 
@@ -157,7 +194,7 @@ git pull --ff-only
 bash install.sh
 ```
 
-先结束正在执行的任务，并关闭 Antigravity 中的这个 MCP 服务，再更新。脚本会拒绝覆盖存在活动任务的环境。重复安装保留已有工作区列表、执行路径、登录文件与自定义 Codex 配置；分工规则和服务程序会随仓库更新。安装过程中发生配置写入错误，会恢复已改动的配置文件；下载的运行环境不属于该回滚范围。
+先结束正在执行的任务，并关闭 Antigravity 中的这个 MCP 服务，再更新。脚本会拒绝覆盖存在活动任务的环境。重复安装保留已有工作区列表、执行路径、登录文件与自定义 Codex 配置；分工规则和服务程序会随仓库更新。v2 在已有任务数据库上增加字段，保留旧任务和会话；升级后需要重启 Antigravity 的 MCP 服务，重新发现 11 个工具。安装过程中发生配置写入错误，会恢复已改动的配置文件；下载的运行环境不属于该回滚范围。
 
 发现已有不同的 `codex-worker` 项时，默认停止。检查后确实要替换，可加 `--replace-existing`；原内容会进入备份。停用时，在 Antigravity 禁用 `codex-worker`，并移除或停用 `codex-delegation` 规则即可，无需退出日常 Codex。
 
@@ -165,7 +202,7 @@ bash install.sh
 
 初始固定版本：Codex CLI `0.169.0`、Python `3.12.14`、uv `0.12.5`、MCP Python SDK `2.3.0`。Python 依赖固定在 `requirements.lock.txt`。它们是本项目验证所用的版本，并非声称一直是最新版本。
 
-仓库包含 13 项服务与安装配置测试；不需要真实账号即可运行：
+仓库包含 27 项服务与安装配置测试；不需要真实账号即可运行：
 
 ```bash
 ~/.local/share/antigravity-codex/venv/bin/python -m unittest discover -s tests -v
@@ -173,14 +210,14 @@ bash install.sh
 
 开发时在 WSL Debian 验证了真实 Codex 读取文件、修改示例项目、继续同一会话和运行项目测试；Windows → WSL 的 MCP 启动入口与 Antigravity 的健康检查也已验证。Ubuntu、不同 Windows 用户名、其他机器上的系统策略仍需在目标环境验证，不能把本机测试当作所有平台保证。
 
-通用安装器还在全新目录中完成了独立下载安装；新环境的 13 项测试、7 个 MCP 工具发现和 Windows → WSL 启动检查通过。该新环境保持未登录状态，确认没有从原环境复制账号凭据。
+v1 安装器曾在全新目录中完成独立下载安装与 Windows → WSL 启动验证。v2 验证了数据库兼容、旧任务续接、实时提问/答复、运行中补充指令、断线重连、崩溃恢复、重试上限、取消与上下文预算；安装器会复制新增模块并保留账号凭据。测试只在 Debian 实机上完成，其他发行版需自行验证。
 
 ## 官方参考
 
 - [Antigravity MCP 配置](https://antigravity.google/docs/mcp)
 - [Antigravity Skills](https://antigravity.google/docs/skills)
 - [Antigravity Rules](https://antigravity.google/docs/rules)
-- [Codex 非交互执行](https://learn.chatgpt.com/docs/non-interactive-mode)
+- [Codex App Server 双向协议](https://learn.chatgpt.com/docs/app-server)
 - [uv 安装器环境变量](https://docs.astral.sh/uv/reference/environment/#uv_unmanaged_install)
 
-本项目使用官方 Codex CLI 的非交互执行接口和官方 MCP Python SDK，自行提供 MCP 转接服务。
+本项目使用官方 Codex CLI 的 App Server 接口和官方 MCP Python SDK，自行提供 MCP 转接服务。

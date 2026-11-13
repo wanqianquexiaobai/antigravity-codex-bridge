@@ -17,7 +17,8 @@ async def check(base):
         listing = await client.list_tools()
         names = {tool.name for tool in listing.tools}
         expected = {"codex_health", "codex_submit", "codex_status", "codex_result",
-                    "codex_continue", "codex_cancel", "codex_list_jobs"}
+                    "codex_continue", "codex_cancel", "codex_list_jobs",
+                    "codex_reply", "codex_send", "codex_models", "codex_quota"}
         if not expected.issubset(names):
             raise RuntimeError("Missing MCP tools: " + str(expected - names))
         result = await client.call_tool("codex_health", {})

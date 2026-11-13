@@ -67,7 +67,7 @@ def check_idle(base):
     database = base / "state/jobs.sqlite3"
     if database.exists():
         with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
-            count = db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
+            count = db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running','waiting_input','retry_wait')").fetchone()[0]
         if count:
             raise ValueError("Codex jobs are active. Finish/cancel them before reinstalling. "
                              "Use codex_list_jobs to refresh interrupted jobs first.")
@@ -110,9 +110,12 @@ def build_plan(base, user_home, windows_home, distribution, username,
         "protected_directories": list(dict.fromkeys([
             *previous.get("protected_directories", []), *map(str, protected)])),
         "execution_path": execution_path, "max_concurrent_jobs": 1}
+    for key, value in {'max_retries':2,'retry_base_seconds':2,'question_timeout_seconds':600,
+                       'progress_max_chars':600,'result_summary_chars':2000,'status_event_limit':4}.items():
+        settings.setdefault(key,value)
     # target -> (UTF-8 bytes, Unix mode)
     plan = {settings_path: (as_json(settings).encode(), 0o600)}
-    for name in ("bridge.py", "launch_cli.py"):
+    for name in ("app_rpc.py", "job_store.py", "worker.py", "bridge.py", "launch_cli.py"):
         plan[base / "app" / name] = ((source / name).read_bytes(), 0o600)
     python = shlex.quote(str(base / "venv/bin/python"))
     app = base / "app"
